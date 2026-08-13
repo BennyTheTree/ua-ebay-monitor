@@ -1,6 +1,30 @@
 [
   {
-    "label": "UA test search",
-    "q": "union arena"
+    "label": "1. UA 2 Star (any)",
+    "q": "Union Arena 2 Star"
+  },
+  {
+    "label": "2. UA 3 Star (any)",
+    "q": "Union Arena 3 Star"
+  },
+  {
+    "label": "3. Bleach UA ($200+)",
+    "q": "Bleach Union Arena",
+    "filter": "price:[200..],priceCurrency:USD"
+  },
+  {
+    "label": "4. UA Booster Box Case (< $1000)",
+    "q": "Union Arena Booster Box Case",
+    "filter": "price:[..1000],priceCurrency:USD"
+  },
+  {
+    "label": "5. UA PSA 10 3 Star (< $5000)",
+    "q": "Union Arena PSA 10 3 Star",
+    "filter": "price:[..5000],priceCurrency:USD"
+  },
+  {
+    "label": "6. UA PSA 10 2 Star (< $3000)",
+    "q": "Union Arena PSA 10 2 Star",
+    "filter": "price:[..3000],priceCurrency:USD"
   }
 ]
