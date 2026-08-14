@@ -30,6 +30,6 @@
    {
     "label": "Cha In",
     "q": "Union Arena Cha Hae-in",
-    "filter": "price:[..5000],priceCurrency:USD"
+    "filter": "price:[100..],priceCurrency:USD"
   }
 ]
