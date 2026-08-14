@@ -8,9 +8,9 @@
     "q": "Union Arena 3 Star"
   },
   {
-    "label": "3. Bleach UA ($200+)",
+    "label": "3. Bleach UA ($400+)",
     "q": "Bleach Union Arena",
-    "filter": "price:[200..],priceCurrency:USD"
+    "filter": "price:[400..],priceCurrency:USD"
   },
   {
     "label": "4. UA Booster Box Case (< $1000)",
