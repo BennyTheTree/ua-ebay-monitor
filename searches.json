@@ -26,5 +26,10 @@
     "label": "6. UA PSA 10 2 Star (< $3000)",
     "q": "Union Arena PSA 10 2 Star",
     "filter": "price:[..3000],priceCurrency:USD"
+  },
+   {
+    "label": "Cha In,
+    "q": "Union Arena Cha Hae-in",
+    "filter": "price:[..5000],priceCurrency:USD"
   }
 ]
