@@ -36,5 +36,15 @@
     "label": "Union Arena Serial",
     "q": "Union Arena Serialized",
     "filter": "price:[250..],priceCurrency:USD"
+  },
+   {
+    "label": "Union Arena OBC",
+    "q": "Union Arena OBC",
+    "filter": "price:[50..],priceCurrency:USD"
+  },
+  {
+    "label": "Union Arena Championship",
+    "q": "Union Arena Championship",
+    "filter": "price:[200..],priceCurrency:USD"
   }
 ]
