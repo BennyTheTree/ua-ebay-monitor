@@ -8,7 +8,7 @@
     "q": "Union Arena 3 Star"
   },
   {
-    "label": "3. Bleach UA ($400+)",
+    "label": "3. Bleach UA ($100+)",
     "q": "Bleach Union Arena",
     "filter": "price:[100..],priceCurrency:USD"
   },
