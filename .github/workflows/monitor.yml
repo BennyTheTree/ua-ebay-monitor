@@ -1,19 +1,36 @@
 name: eBay Union Arena Monitor
 
 on:
+  # Main trigger: cron-job.org calls this every few minutes.
   repository_dispatch:
     types: [run-monitor]
+  # Backup trigger: if cron-job.org stops reaching GitHub (for example its
+  # access token expires), GitHub's own slower scheduler keeps checks going
+  # and the monitor sends a warning.
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  # The "Run workflow" button: checks every search straight away.
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: read
+
+# One run at a time. A run that arrives while another is still working waits
+# its turn, so two runs can never alert on the same listing or overwrite each
+# other's saved state. If several pile up, only the newest one is kept; the
+# others show as "cancelled", which is harmless.
+concurrency:
+  group: ebay-monitor
+  cancel-in-progress: false
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install dependencies
@@ -24,11 +41,35 @@ jobs:
           EBAY_CERT_ID: ${{ secrets.EBAY_CERT_ID }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: python monitor.py
       - name: Save state
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add seen.json
-          git commit -m "Update seen items" || echo "No changes to commit"
-          git push
+          commit_state() {
+            for file in seen.json state.json; do
+              if [ -e "$file" ]; then git add "$file"; fi
+            done
+            if git diff --cached --quiet; then return 1; fi
+            git commit -q -m "Update monitor state"
+          }
+          commit_state || { echo "Nothing new to save."; exit 0; }
+          for attempt in 1 2 3 4 5; do
+            if git push -q origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "State saved."
+              exit 0
+            fi
+            # The repository changed while this run was working (for example
+            # searches.json was edited). Start again from the newest version,
+            # keeping this run's state files.
+            echo "Push was rejected; catching up with the repository and retrying."
+            sleep 2
+            git fetch -q --depth=1 origin "${GITHUB_REF_NAME}"
+            git reset -q FETCH_HEAD
+            commit_state || { echo "Nothing new to save."; exit 0; }
+          done
+          echo "Could not save state after 5 attempts."
+          exit 1
