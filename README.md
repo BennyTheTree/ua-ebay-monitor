@@ -24,6 +24,7 @@ Edit `searches.json` on GitHub and commit. The next run picks it up.
 | `label` | no | The name shown on the alert. |
 | `filter` | no | Price limits. `price:[100..]` is $100 and up, `price:[..1000]` is up to $1,000, `price:[50..200]` is between. Always follow it with `,priceCurrency:USD`. |
 | `auctions` | no | `true` adds auction listings for this search. Without it only Buy It Now listings are returned. |
+| `sealed` | no | `true` lets this search alert on sealed product. See below. |
 
 When you add a search or change its keywords or filter, the monitor replies
 "Now watching ..." within a few minutes and skips what is already listed, so
@@ -32,6 +33,10 @@ nothing else.
 
 If the file has a typo, the monitor says so in Telegram and keeps using the
 last version that worked.
+
+Sealed product (booster boxes, cases, packs, decks) is skipped in every
+search. The monitor goes by the eBay category the seller chose, so a box that
+a seller filed as a single card can still come through.
 
 ## How often each search is checked
 
@@ -42,6 +47,7 @@ eBay allows 5,000 searches a day. The monitor spreads 4,800 of them evenly over
 | --- | --- |
 | 6 or fewer | 2 minutes (every run) |
 | 8 | 2.4 minutes |
+| 9 | 2.7 minutes |
 | 10 | 3 minutes |
 | 15 | 4.5 minutes |
 

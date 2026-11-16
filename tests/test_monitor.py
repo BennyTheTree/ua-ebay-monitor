@@ -457,6 +457,28 @@ class MonitorTest(unittest.TestCase):
         self.assertIn("120.00 USD (current bid)", WORLD.sent[0]["text"])
         self.assertIn("Auction", WORLD.sent[0]["text"])
 
+    def test_sealed_product_is_skipped_unless_a_search_asks_for_it(self):
+        sealed_box = [
+            {"categoryId": "261044", "categoryName": "CCG Sealed Boxes"},
+            {"categoryId": "2536", "categoryName": "Collectible Card Games"},
+        ]
+        single = [{"categoryId": "183454", "categoryName": "CCG Individual Cards"}]
+        self.established("alpha")
+        WORLD.listings["alpha"] = [
+            item(1, title="Bleach Booster Box", categories=sealed_box),
+            item(2, title="Bleach 3 Star card", categories=single),
+            item(3, title="No category given"),
+        ]
+        self.run_monitor(event="workflow_dispatch")
+        self.assertEqual(sorted(re.findall(r"/itm/(\d+)", "\n".join(self.texts()))), ["2", "3"])
+        self.assertIn("v1|1|0", self.seen(), "a skipped listing should not be looked at again")
+        self.searches("alpha", sealed=True)                     # opting back in for one search
+        WORLD.sent.clear()
+        WORLD.listings["alpha"].insert(0, item(4, title="Another Booster Box", categories=sealed_box))
+        self.run_monitor(event="workflow_dispatch")
+        self.assertEqual(len(WORLD.sent), 1)
+        self.assertIn("/itm/4", WORLD.sent[0]["text"])
+
     def test_backup_schedule_warns_when_the_main_trigger_goes_quiet(self):
         self.established("alpha")
         self.run_monitor()                                   # cron-job.org fires normally

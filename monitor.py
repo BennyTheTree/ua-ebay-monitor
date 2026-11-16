@@ -40,6 +40,11 @@ MARKETPLACE = "EBAY_US"
 # True adds auctions to every search; a search can also set "auctions": true.
 INCLUDE_AUCTIONS = False
 
+# Sealed product (booster boxes, cases, packs, decks) is skipped: any listing
+# the seller filed under one of eBay's "Sealed" categories is ignored. A search
+# can opt back in with "sealed": true.
+SKIP_SEALED_PRODUCTS = True
+
 FULL_ALERTS_PER_RUN = 10  # beyond this, the rest of a run's finds are summarised
 SUMMARY_SIZE = 10         # listings per summary message
 
@@ -221,6 +226,18 @@ def search_ebay(token, search):
     if 400 <= status < 500:
         raise SearchRejected(ebay_error(response))
     raise Transient(f"HTTP {status}")
+
+
+def category(item):
+    """The eBay category a listing was filed under, most specific first."""
+    names = [str(c.get("categoryName") or c.get("categoryId") or "") for c in item.get("categories") or []]
+    return names[0] if names and names[0] else "unknown category"
+
+
+def is_sealed_product(item):
+    return any(
+        "sealed" in str(c.get("categoryName") or "").lower() for c in item.get("categories") or []
+    )
 
 
 # ----------------------------------------------------------------- Telegram
@@ -602,6 +619,12 @@ def run(state, seen, first_run, now):
             item for item in items
             if item.get("itemId") and item["itemId"] not in seen and item["itemId"] not in queued
         ]
+        if SKIP_SEALED_PRODUCTS and not search.get("sealed"):
+            for item in [item for item in new_items if is_sealed_product(item)]:
+                if sig in seeded:
+                    print(f"  skipped sealed product: {category(item)} | {str(item.get('title'))[:70]}")
+                seen.add(item["itemId"])
+                new_items.remove(item)
         if sig not in seeded:
             # A search being watched for the first time: note what is already
             # listed without alerting, so only listings from now on are sent.
@@ -612,6 +635,8 @@ def run(state, seen, first_run, now):
         else:
             queued.update(item["itemId"] for item in new_items)
             fresh += [(item, label) for item in new_items]
+            for item in new_items:
+                print(f"  new: {label} | {category(item)} | {str(item.get('title'))[:70]}")
 
     if checked:
         if state.pop("auth_failures", 0) >= AUTH_FAILURES_BEFORE_WARNING:

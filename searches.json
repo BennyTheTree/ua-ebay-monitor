@@ -13,11 +13,6 @@
     "filter": "price:[100..],priceCurrency:USD"
   },
   {
-    "label": "4. UA Booster Box Case (< $1000)",
-    "q": "Union Arena Booster Box Case",
-    "filter": "price:[..1000],priceCurrency:USD"
-  },
-  {
     "label": "5. UA PSA 10 3 Star (< $5000)",
     "q": "Union Arena PSA 10 3 Star",
     "filter": "price:[..5000],priceCurrency:USD"
