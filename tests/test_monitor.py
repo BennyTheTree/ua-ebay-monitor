@@ -54,6 +54,7 @@ class World:
         self.telegram_script = []   # (status, body) answers to use first
         self.telegram_limit = 20    # messages a minute, like a real group
         self.unfetchable_photos = () # parts of photo URLs Telegram "cannot download"
+        self.rejects_button_colours = False
         self.runs = []              # GitHub's run history, newest first
         self.runs_status = 200
         self.slow_search = 0        # real seconds to stall searches
@@ -135,6 +136,8 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if message.get("parse_mode") == "HTML" and not html_is_valid(message["text"]):
                 return self.reply(400, {"ok": False, "description": "Bad Request: can't parse entities"})
+            if world.rejects_button_colours and "style" in json.dumps(message.get("reply_markup") or ""):
+                return self.reply(400, {"ok": False, "description": "Bad Request: unsupported button style"})
             if any(part in message.get("photo", "") for part in world.unfetchable_photos):
                 return self.reply(400, {"ok": False, "description": "Bad Request: failed to get HTTP URL content"})
             message["_at"] = world.clock.now
@@ -312,6 +315,31 @@ class MonitorTest(unittest.TestCase):
         self.assertIn("<b>Rukia Kuchiki</b>", WORLD.sent[0]["text"])
         self.assertIn("https://www.ebay.com/itm/9", WORLD.sent[0]["text"])
         self.assertFalse(WORLD.sent[0]["disable_web_page_preview"])
+
+    def test_three_star_cards_get_the_green_treatment(self):
+        green = "\U0001F7E9"
+        self.established("alpha")
+        WORLD.listings["alpha"] = [
+            item(3, title="Union Arena Bleach Ichigo Kurosaki SR\u2605\u2605\u2605"),
+            item(2, title="Union Arena Bleach Rukia Kuchiki 2 Star"),
+        ]
+        self.run_monitor(event="workflow_dispatch")
+        three, two = WORLD.sent
+        self.assertEqual(three["caption"], green * 8 + "\n<b>Ichigo Kurosaki</b>\n\u2605\u2605\u2605  \u00b7  Raw\n<b>$150</b>")
+        self.assertEqual(three["reply_markup"]["inline_keyboard"][0][0]["style"], "success")
+        self.assertNotIn(green, two["caption"])
+        self.assertNotIn("style", two["reply_markup"]["inline_keyboard"][0][0])
+
+    def test_green_button_refused_by_telegram_still_delivers_the_photo_card(self):
+        self.established("alpha")
+        WORLD.listings["alpha"] = [item(3, title="Union Arena Bleach Ichigo Kurosaki 3 Star")]
+        WORLD.rejects_button_colours = True
+        self.run_monitor(event="workflow_dispatch")
+        self.assertEqual(len(WORLD.sent), 1)
+        self.assertEqual(WORLD.sent[0]["_method"], "sendPhoto")
+        self.assertEqual(WORLD.sent[0]["reply_markup"]["inline_keyboard"][0][0], {
+            "text": "View on eBay", "url": WORLD.sent[0]["reply_markup"]["inline_keyboard"][0][0]["url"],
+        })
 
     def test_titles_are_read_into_name_rarity_and_grade(self):
         cases = [

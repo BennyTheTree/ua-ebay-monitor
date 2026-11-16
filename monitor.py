@@ -47,6 +47,11 @@ INCLUDE_AUCTIONS = False
 # can opt back in with "sealed": true.
 SKIP_SEALED_PRODUCTS = True
 
+# Three-star cards stand out: a green bar across the top of the alert and a
+# green button. (Telegram does not let a bot colour the message bubble itself.)
+HIGHLIGHT_STARS = 3
+GREEN_BAR = "\U0001F7E9" * 8
+
 FULL_ALERTS_PER_RUN = 10  # beyond this, the rest of a run's finds are summarised
 SUMMARY_SIZE = 10         # listings per summary message
 
@@ -394,6 +399,7 @@ def describe(item):
     title = str(item.get("title") or "")
     count = stars(title)
     return {
+        "highlight": count == HIGHLIGHT_STARS,
         "name": card_name(title),
         "detail": "  \u00B7  ".join(part for part in ("\u2605" * count if count else "", grade(item)) if part),
         "price": price(item),
@@ -415,7 +421,8 @@ def photo_urls(item):
 
 def format_item(item):
     card = describe(item)
-    return f"<b>{esc(card['name'])}</b>\n{esc(card['detail'])}\n<b>{esc(card['price'])}</b>"
+    bar = f"{GREEN_BAR}\n" if card["highlight"] else ""
+    return f"{bar}<b>{esc(card['name'])}</b>\n{esc(card['detail'])}\n<b>{esc(card['price'])}</b>"
 
 
 def format_summary(entries, remaining_after):
@@ -424,8 +431,9 @@ def format_summary(entries, remaining_after):
         card = describe(item)
         legacy = item.get("legacyItemId")
         url = f"https://www.ebay.com/itm/{legacy}" if legacy else item_url(item)
+        bullet = "\U0001F7E9" if card["highlight"] else "\u2022"
         lines.append(
-            f'\u2022 <a href="{html.escape(url, quote=True)}">{esc(card["name"])}</a>'
+            f'{bullet} <a href="{html.escape(url, quote=True)}">{esc(card["name"])}</a>'
             f"  \u00B7  {esc(card['detail'])}  \u00B7  <b>{esc(card['price'])}</b>"
         )
     if remaining_after:
@@ -441,7 +449,7 @@ class Telegram:
         self.wait_left = TELEGRAM_WAIT_BUDGET
         self.moved_to = None      # new chat ID if Telegram upgraded the group
 
-    def send(self, text, chat_id=None, preview=True, photos=(), link=None):
+    def send(self, text, chat_id=None, preview=True, photos=(), link=None, green_button=False):
         """Send one message. With photos and a link it is a photo card with a button.
 
         If Telegram refuses a version of the message (it can't fetch the photo,
@@ -457,6 +465,9 @@ class Telegram:
             ("sendPhoto", {"photo": url, "caption": text, "parse_mode": "HTML", "reply_markup": button})
             for url in (photos if link else ())
         ]
+        if versions and green_button:
+            green = {"inline_keyboard": [[{"text": "View on eBay", "url": link, "style": "success"}]]}
+            versions.insert(0, (versions[0][0], dict(versions[0][1], reply_markup=green)))
         versions.append(("sendMessage", {
             "text": with_link, "parse_mode": "HTML", "disable_web_page_preview": not preview,
         }))
@@ -533,7 +544,10 @@ def deliver(telegram, fresh, seen):
             try:
                 if is_full:
                     item = batch[0][0]
-                    telegram.send(format_item(item), photos=photo_urls(item), link=item_url(item))
+                    telegram.send(
+                        format_item(item), photos=photo_urls(item), link=item_url(item),
+                        green_button=describe(item)["highlight"],
+                    )
                 else:
                     telegram.send(format_summary(batch, remaining), preview=False)
             except MessageRejected as error:

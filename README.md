@@ -60,6 +60,7 @@ Fewer searches does.
   grade (Raw, or the grader and grade) and price, with a **View on eBay**
   button. These are read from the seller's title, so an odd title can give an
   odd name. Rarity is left off when the title doesn't state it.
+  Three-star cards get a green bar across the top and a green button.
 - **+N more**: when a run finds more than 12, the first 10 get their own card
   and the rest are listed ten per message, each line linking to its listing.
   Telegram only accepts about 20 messages a minute, so this keeps anything
