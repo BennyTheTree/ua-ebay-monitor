@@ -53,6 +53,7 @@ class World:
         self.sent = []              # Telegram messages accepted
         self.telegram_script = []   # (status, body) answers to use first
         self.telegram_limit = 20    # messages a minute, like a real group
+        self.unfetchable_photos = () # parts of photo URLs Telegram "cannot download"
         self.runs = []              # GitHub's run history, newest first
         self.runs_status = 200
         self.slow_search = 0        # real seconds to stall searches
@@ -110,8 +111,11 @@ class Handler(BaseHTTPRequestHandler):
             if status != 200:
                 return self.reply(status, {"error": "invalid_client", "error_description": "client authentication failed"})
             return self.reply(200, {"access_token": "token"})
-        if self.path.endswith("/sendMessage"):
+        if self.path.endswith(("/sendMessage", "/sendPhoto")):
             message = json.loads(body)
+            message["_method"] = self.path.rsplit("/", 1)[1]
+            if "caption" in message:
+                message["text"] = message["caption"]
             if world.telegram_script:
                 status, answer = world.telegram_script.pop(0)
                 if status == "accept-then-stall":
@@ -131,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if message.get("parse_mode") == "HTML" and not html_is_valid(message["text"]):
                 return self.reply(400, {"ok": False, "description": "Bad Request: can't parse entities"})
+            if any(part in message.get("photo", "") for part in world.unfetchable_photos):
+                return self.reply(400, {"ok": False, "description": "Bad Request: failed to get HTTP URL content"})
             message["_at"] = world.clock.now
             world.sent.append(message)
             return self.reply(200, {"ok": True})
@@ -163,6 +169,7 @@ def item(number, title="Union Arena card", price="150.00", **extra):
         "itemId": f"v1|{number}|0", "legacyItemId": str(number), "title": title,
         "price": {"value": price, "currency": "USD"}, "condition": "Ungraded",
         "itemWebUrl": f"https://www.ebay.com/itm/{number}?_skw=union+arena&hash=item{number}:g:x",
+        "image": {"imageUrl": f"https://i.ebayimg.com/thumbs/images/g/pic{number}/s-l225.jpg"},
         "buyingOptions": ["FIXED_PRICE"],
     }
     listing.update(extra)
@@ -220,6 +227,21 @@ class MonitorTest(unittest.TestCase):
     def texts(self):
         return [m["text"] for m in WORLD.sent]
 
+    def alerts(self):
+        """Single-listing alerts (photo cards, or their text fallback)."""
+        return [m for m in WORLD.sent if m.get("reply_markup") or re.search(r"\n<b>\S+</b>\nhttps://", m["text"])]
+
+    def summaries(self):
+        return [m for m in WORLD.sent if m["text"].startswith("<b>+")]
+
+    def linked(self):
+        """Every listing number that reached Telegram, in order."""
+        found = []
+        for message in WORLD.sent:
+            buttons = json.dumps(message.get("reply_markup") or "")
+            found += re.findall(r"/itm/(\d+)", buttons if message.get("reply_markup") else message["text"])
+        return found
+
     def seen(self):
         return set(json.loads(Path("seen.json").read_text()))
 
@@ -247,7 +269,7 @@ class MonitorTest(unittest.TestCase):
         WORLD.listings["alpha"] = [item(n) for n in range(60, 90)]
         Path("seen.json").write_text("<<<<<<< not json")
         self.assertEqual(self.run_monitor(), 0)
-        self.assertEqual([t for t in self.texts() if "New listing" in t or "more new" in t], [])
+        self.assertEqual(self.alerts() + self.summaries(), [])
         self.assertEqual(len(self.seen()), 30)
 
     def test_upgrade_from_first_version_does_not_reseed_or_spam(self):
@@ -256,49 +278,100 @@ class MonitorTest(unittest.TestCase):
         WORLD.listings["alpha"] = [item(2), item(1)]
         self.assertEqual(self.run_monitor(event="workflow_dispatch"), 0)
         self.assertEqual(len(WORLD.sent), 1)
-        self.assertIn("New listing", WORLD.sent[0]["text"])
-        self.assertIn("/itm/2", WORLD.sent[0]["text"])
+        self.assertEqual(self.linked(), ["2"])
         self.assertTrue(Path("state.json").exists())
 
     def test_new_listing_alerts_once(self):
         self.established("alpha")
-        WORLD.listings["alpha"] = [item(7, title="Pochita R* Foil")]
+        WORLD.listings["alpha"] = [item(7, title="Bandai Union Arena Chainsaw Man Pochita UA22BT/CSM-1-067 R* Foil")]
         self.run_monitor(event="workflow_dispatch")
         self.run_monitor(event="workflow_dispatch")
         self.assertEqual(len(WORLD.sent), 1)
-        text = WORLD.sent[0]["text"]
-        self.assertIn("<b>Pochita R* Foil</b>", text)
-        self.assertIn("150.00 USD", text)
-        self.assertIn("Label alpha", text)
+        card = WORLD.sent[0]
+        self.assertEqual(card["_method"], "sendPhoto")
+        self.assertEqual(card["caption"], "<b>Pochita</b>\n\u2605  \u00b7  Raw\n<b>$150</b>")
+        self.assertEqual(card["photo"], "https://i.ebayimg.com/images/g/pic7/s-l800.jpg")
+        button = card["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(button["text"], "View on eBay")
+        self.assertIn("/itm/7", button["url"])
+        self.assertNotIn("Label alpha", card["caption"])
+        self.assertNotIn("New listing", card["caption"])
+
+    def test_photo_telegram_cannot_fetch_falls_back_without_losing_the_alert(self):
+        self.established("alpha")
+        WORLD.listings["alpha"] = [item(7, title="Union Arena Bleach Ichigo Kurosaki 3 Star"), item(8)]
+        WORLD.unfetchable_photos = ("pic7/s-l800",)            # the enlarged photo fails, the original works
+        self.run_monitor(event="workflow_dispatch")
+        self.assertEqual(WORLD.sent[0]["photo"], "https://i.ebayimg.com/thumbs/images/g/pic7/s-l225.jpg")
+        WORLD.sent.clear()
+        WORLD.listings["alpha"].insert(0, item(9, title="Union Arena Bleach Rukia Kuchiki 2 Star"))
+        WORLD.unfetchable_photos = ("pic9",)                   # no photo works at all
+        self.run_monitor(event="workflow_dispatch")
+        self.assertEqual(len(WORLD.sent), 1)
+        self.assertEqual(WORLD.sent[0]["_method"], "sendMessage")
+        self.assertIn("<b>Rukia Kuchiki</b>", WORLD.sent[0]["text"])
+        self.assertIn("https://www.ebay.com/itm/9", WORLD.sent[0]["text"])
+        self.assertFalse(WORLD.sent[0]["disable_web_page_preview"])
+
+    def test_titles_are_read_into_name_rarity_and_grade(self):
+        cases = [
+            ("Bandai Union Arena Chainsaw Man Pochita UA22BT/CSM-1-067 R* Foil Trigger 500", "Ungraded",
+             "Pochita", "\u2605  \u00b7  Raw"),
+            ("Union Arena Bleach Thousand-Year Blood War Ichigo Kurosaki UA01BT/BLC-1-100 SR\u2605\u2605\u2605 3 Star NM",
+             "Ungraded", "Ichigo Kurosaki", "\u2605\u2605\u2605  \u00b7  Raw"),
+            ("2024 Bandai Union Arena Hunter x Hunter Killua Zoldyck SR*** UA03BT/HTR-1-035 PSA 10 GEM MINT",
+             "Graded", "Killua Zoldyck", "\u2605\u2605\u2605  \u00b7  PSA 10"),
+            ("PSA 10 Gojo Satoru SR\u2605\u2605 UA02BT/JJK-1-051 Union Arena Jujutsu Kaisen 2 Star Alt Art Japanese",
+             "Graded", "Gojo Satoru", "\u2605\u2605  \u00b7  PSA 10"),
+            ("UNION ARENA SOLO LEVELING CHA HAE-IN 2 STAR UA28BT/SLL-1-045 JAPANESE", "Ungraded",
+             "Cha Hae-In", "\u2605\u2605  \u00b7  Raw"),
+            ("Kaiju No. 8 Union Arena Kafka Hibino Two Star UA20BT/KJ8-1-001 BGS 9.5", "Graded",
+             "Kafka Hibino", "\u2605\u2605  \u00b7  BGS 9.5"),
+            # A hopeful "PSA 10?" on an ungraded card is not a grade.
+            ("Union Arena Code Geass C.C. 3 Star UA01BT/CGH-1-071 SR*** PSA 10?", "Ungraded",
+             "C.C.", "\u2605\u2605\u2605  \u00b7  Raw"),
+            ("***RARE*** Union Arena Blue Lock Yoichi Isagi 3 Star PSA 10 Contender!!", "Ungraded",
+             "Yoichi Isagi", "\u2605\u2605\u2605  \u00b7  Raw"),
+            # The series name is kept when it is all there is.
+            ("Union Arena Chainsaw Man SR*** UA22BT/CSM-1-100", "Ungraded",
+             "Chainsaw Man", "\u2605\u2605\u2605  \u00b7  Raw"),
+            # No star rarity in the title: nothing is invented.
+            ("Union Arena OBC Winner Promo Yuji Itadori UAPR/JJK-1-010", "Ungraded",
+             "OBC Winner Promo Yuji Itadori", "Raw"),
+            ("Union Arena Bleach Toshiro Hitsugaya SR\u2605\u2605 PSA Graded 10 POP 3", "Graded",
+             "Toshiro Hitsugaya", "\u2605\u2605  \u00b7  PSA 10"),
+            ("Union Arena Bleach Rukia Kuchiki slab", "Graded", "Rukia Kuchiki", "Graded"),
+        ]
+        for title, condition, name, detail in cases:
+            with self.subTest(title=title):
+                card = monitor.describe(item(1, title=title, condition=condition))
+                self.assertEqual((card["name"], card["detail"]), (name, detail))
+        self.assertEqual(monitor.price(item(1, price="1250.00")), "$1,250")
+        self.assertEqual(monitor.price(item(1, price="64.50")), "$64.50")
 
     def test_special_characters_in_label_and_title_still_deliver(self):
-        # A "<" in a label used to make Telegram refuse the whole message.
-        self.searches("alpha")
+        # A "<" or "&" used to make Telegram refuse the whole message.
+        self.established("alpha")
+        self.searches("alpha", "beta")
         entries = json.loads(Path("searches.json").read_text())
-        entries[0]["label"] = "4. UA Booster Box Case (< $1000)"
+        entries[1]["label"] = "5. UA PSA 10 3 Star (< $5000)"
         Path("searches.json").write_text(json.dumps(entries))
-        Path("seen.json").write_text("[]")
-        self.run_monitor(event="workflow_dispatch")
-        WORLD.sent.clear()
         WORLD.listings["alpha"] = [item(9, title="Tom & Jerry <rare> 3>2")]
-        self.run_monitor(event="workflow_dispatch")
-        self.assertEqual(len(WORLD.sent), 1)
-        self.assertEqual(WORLD.sent[0].get("parse_mode"), "HTML")
-        self.assertIn("(&lt; $1000)", WORLD.sent[0]["text"])
+        self.run_monitor()
+        self.assertEqual([m.get("parse_mode") for m in WORLD.sent], ["HTML", "HTML"])
         self.assertIn("Tom &amp; Jerry &lt;rare&gt;", WORLD.sent[0]["text"])
+        self.assertIn("Now watching <b>5. UA PSA 10 3 Star (&lt; $5000)</b>", WORLD.sent[1]["text"])
 
     def test_big_batch_is_summarised_and_nothing_is_lost(self):
         self.established("alpha", "beta")
         WORLD.listings["alpha"] = [item(n) for n in range(100, 150)]
         WORLD.listings["beta"] = [item(n) for n in range(200, 246)]
         self.run_monitor(event="workflow_dispatch")
-        full = [t for t in self.texts() if "New listing" in t]
-        summaries = [t for t in self.texts() if "more new listing" in t]
-        self.assertEqual(len(full), 10)
-        self.assertEqual(len(summaries), 9)                      # 86 remaining, 10 per message
+        self.assertEqual(len(self.alerts()), 10)
+        self.assertEqual(len(self.summaries()), 9)               # 86 remaining, 10 per message
+        self.assertTrue(self.summaries()[0]["text"].startswith("<b>+10 more</b>\n\u2022 <a href="))
         self.assertLessEqual(len(WORLD.sent), 20)                # inside Telegram's per-minute limit
-        linked = set(re.findall(r"/itm/(\d+)", "\n".join(self.texts())))
-        self.assertEqual(len(linked), 96)
+        self.assertEqual(len(set(self.linked())), 96)
         self.assertEqual(len(self.seen()), 96)
 
     def test_telegram_rate_limit_waits_then_carries_the_rest_to_the_next_run(self):
@@ -310,7 +383,7 @@ class MonitorTest(unittest.TestCase):
                 self.run_monitor(event="workflow_dispatch")
         finally:
             monitor.FULL_ALERTS_PER_RUN, monitor.SUMMARY_SIZE = 10, 10
-        linked = re.findall(r"/itm/(\d+)", "\n".join(self.texts()))
+        linked = self.linked()
         self.assertEqual(len(set(linked)), 50, "every listing must arrive")
         self.assertEqual(len(linked), 50, "and only once")
 
@@ -348,7 +421,7 @@ class MonitorTest(unittest.TestCase):
         WORLD.token_script = [401, 503]
         self.run_monitor(event="workflow_dispatch")
         self.assertEqual(len(WORLD.sent), 1)
-        self.assertIn("New listing", WORLD.sent[0]["text"])
+        self.assertEqual(len(self.alerts()), 1)
 
     def test_lasting_login_failure_warns_after_three_runs_then_reports_recovery(self):
         self.established("alpha")
@@ -369,7 +442,7 @@ class MonitorTest(unittest.TestCase):
         self.run_monitor(event="workflow_dispatch")
         warnings = [t for t in self.texts() if "eBay rejected the search" in t]
         self.assertEqual(len(warnings), 1)
-        self.assertEqual(len([t for t in self.texts() if "New listing" in t]), 1)
+        self.assertEqual(len(self.alerts()), 1)
 
     def test_broken_searches_file_warns_and_keeps_watching_the_last_good_list(self):
         self.established("alpha")
@@ -378,7 +451,7 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(self.run_monitor(event="workflow_dispatch"), 0)
         self.assertEqual(self.run_monitor(event="workflow_dispatch"), 0)
         self.assertEqual(len([t for t in self.texts() if "searches.json has a mistake" in t]), 1)
-        self.assertEqual(len([t for t in self.texts() if "New listing" in t]), 1)
+        self.assertEqual(len(self.alerts()), 1)
         self.searches("alpha")
         self.run_monitor(event="workflow_dispatch")
         self.assertIn("valid again", WORLD.sent[-1]["text"])
@@ -392,12 +465,11 @@ class MonitorTest(unittest.TestCase):
         confirmations = [t for t in self.texts() if "Now watching" in t]
         self.assertEqual(len(confirmations), 1)
         self.assertIn("Skipped 30 listings", confirmations[0])
-        self.assertEqual(len([t for t in self.texts() if "New listing" in t]), 1)   # alpha's real find
+        self.assertEqual(self.linked(), ["99"])                 # alpha's real find
         WORLD.sent.clear()
         WORLD.listings["beta"].insert(0, item(41))
         self.run_monitor(event="workflow_dispatch")
-        self.assertEqual(len(WORLD.sent), 1)
-        self.assertIn("/itm/41", WORLD.sent[0]["text"])
+        self.assertEqual(self.linked(), ["41"])
 
     def test_renaming_a_label_does_not_restart_a_search(self):
         self.established("alpha")
@@ -406,16 +478,15 @@ class MonitorTest(unittest.TestCase):
         Path("searches.json").write_text(json.dumps(entries))
         WORLD.listings["alpha"] = [item(5)]
         self.run_monitor(event="workflow_dispatch")
-        self.assertEqual(len(WORLD.sent), 1)
-        self.assertIn("Renamed", WORLD.sent[0]["text"])
+        self.assertEqual(self.linked(), ["5"])
+        self.assertEqual([t for t in self.texts() if "Now watching" in t], [])
 
     def test_message_that_times_out_is_sent_again_rather_than_lost(self):
         self.established("alpha")
         WORLD.listings["alpha"] = [item(5), item(6)]
         WORLD.telegram_script = [("accept-then-stall", None)]
         self.assertEqual(self.run_monitor(event="workflow_dispatch"), 0)
-        linked = re.findall(r"/itm/(\d+)", "\n".join(self.texts()))
-        self.assertEqual(set(linked), {"5", "6"})
+        self.assertEqual(set(self.linked()), {"5", "6"})
         self.assertEqual(self.seen(), {"v1|5|0", "v1|6|0"})
 
     def test_telegram_refusing_the_bot_fails_the_run_and_keeps_listings_for_later(self):
@@ -436,7 +507,7 @@ class MonitorTest(unittest.TestCase):
         })]
         self.assertEqual(self.run_monitor(event="workflow_dispatch"), 0)
         self.assertEqual(WORLD.sent[0]["chat_id"], -100777)
-        self.assertIn("New listing", WORLD.sent[0]["text"])
+        self.assertEqual(self.linked(), ["5"])
         self.assertIn("TELEGRAM_CHAT_ID", WORLD.sent[1]["text"])
 
     def test_auction_listings_can_be_switched_on_per_search(self):
@@ -454,8 +525,7 @@ class MonitorTest(unittest.TestCase):
             8, buyingOptions=["AUCTION"], currentBidPrice={"value": "120.00", "currency": "USD"},
         )]
         self.run_monitor(event="workflow_dispatch")
-        self.assertIn("120.00 USD (current bid)", WORLD.sent[0]["text"])
-        self.assertIn("Auction", WORLD.sent[0]["text"])
+        self.assertIn("<b>$120 bid</b>", WORLD.sent[0]["text"])
 
     def test_sealed_product_is_skipped_unless_a_search_asks_for_it(self):
         sealed_box = [
@@ -470,14 +540,13 @@ class MonitorTest(unittest.TestCase):
             item(3, title="No category given"),
         ]
         self.run_monitor(event="workflow_dispatch")
-        self.assertEqual(sorted(re.findall(r"/itm/(\d+)", "\n".join(self.texts()))), ["2", "3"])
+        self.assertEqual(sorted(self.linked()), ["2", "3"])
         self.assertIn("v1|1|0", self.seen(), "a skipped listing should not be looked at again")
         self.searches("alpha", sealed=True)                     # opting back in for one search
         WORLD.sent.clear()
         WORLD.listings["alpha"].insert(0, item(4, title="Another Booster Box", categories=sealed_box))
         self.run_monitor(event="workflow_dispatch")
-        self.assertEqual(len(WORLD.sent), 1)
-        self.assertIn("/itm/4", WORLD.sent[0]["text"])
+        self.assertEqual(self.linked(), ["4"])
 
     def test_backup_schedule_warns_when_the_main_trigger_goes_quiet(self):
         self.established("alpha")

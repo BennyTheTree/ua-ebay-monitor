@@ -3,7 +3,7 @@
 Each run checks the saved searches in searches.json for listings it has not
 seen before and sends them to Telegram.
 
-Three things keep it dependable:
+How it works:
 
 * eBay allows 5,000 searches a day. Checks are spread evenly across the whole
   day so the allowance never runs out, however many searches there are and
@@ -11,6 +11,8 @@ Three things keep it dependable:
 * Telegram accepts about 20 messages a minute in a group. Alerts are paced,
   a large batch is sent as a few summary messages, and a listing is only
   marked as seen once its alert has actually been delivered.
+* An alert is a photo card showing the card's name, star rarity, grade and
+  price, read from the seller's title, with a button to the listing.
 * Network hiccups are retried and never crash a run. Lasting problems are
   reported in Telegram once instead of failing silently.
 """
@@ -240,6 +242,197 @@ def is_sealed_product(item):
     )
 
 
+# ------------------------------------------------------- reading a listing
+#
+# eBay only gives the seller's title, so the card's name, rarity and grade are
+# worked out from it. When something can't be worked out it is left off the
+# alert rather than guessed.
+
+GRADERS = "PSA|BGS|CGC|SGC|TAG|ARS|ACE|AGS|BVG|HGA|GMA"
+GRADE = re.compile(
+    rf"\b({GRADERS})\b[\s:#-]*(?:GEM[\s-]*(?:MINT|MT)[\s-]*|PRISTINE[\s-]*|MINT[\s-]*|GRADED[\s-]*)?"
+    r"(10|[1-9](?:\.5)?)(?![\d.])"
+    r"(?!\s*(?:\?|candidate|contender|potential|ready|worthy|quality|possible|chance|hopeful))",
+    re.IGNORECASE,
+)
+STAR_WORDS = {"one": 1, "single": 1, "1": 1, "two": 2, "double": 2, "2": 2, "three": 3, "triple": 3, "3": 3}
+RARITY_CODES = "SR|UR|SEC|SP|AP|PR|R|U|C"
+CARD_NUMBER = re.compile(
+    r"\b(?:[A-Z]{2}\d{2}[A-Z]{2}|UAPR|[A-Z]{2}PR)\s?[/-]\s?[A-Z0-9]{2,4}-\d-\d{2,3}[A-Z]?\b"   # UA22BT/CSM-1-067
+    r"|\b[A-Z]{2}\d{2}(?:BT|ST|EX|PR|NC)\b"                                                    # UA22BT
+    r"|\b[A-Z]{2,4}-\d-\d{2,3}[A-Z]?\b",                                                       # CSM-1-067
+    re.IGNORECASE,
+)
+# Series whose name is not normally part of a card's name. Longest first.
+SERIES = sorted([
+    "Bleach Thousand-Year Blood War", "Bleach Thousand Year Blood War", "Thousand-Year Blood War",
+    "Thousand Year Blood War", "Bleach TYBW", "TYBW", "Bleach", "Jujutsu Kaisen", "JJK",
+    "Hunter x Hunter", "Hunter \u00D7 Hunter", "HunterxHunter", "HxH", "Demon Slayer Kimetsu no Yaiba",
+    "Kimetsu no Yaiba", "Demon Slayer", "Chainsaw Man", "Solo Leveling", "Blue Lock",
+    "Code Geass Lelouch of the Rebellion", "Lelouch of the Rebellion", "Code Geass", "My Hero Academia",
+    "MHA", "That Time I Got Reincarnated as a Slime", "Reincarnated as a Slime", "Tensura",
+    "Sword Art Online", "SAO", "Black Clover", "Attack on Titan", "AOT", "Haikyu!!", "Haikyuu", "Haikyu",
+    "Dr. Stone", "Dr Stone", "Gintama", "Yu Yu Hakusho", "YuYu Hakusho", "Fullmetal Alchemist Brotherhood",
+    "Fullmetal Alchemist", "One Punch Man", "One-Punch Man", "Undead Unluck", "Kaiju No. 8", "Kaiju No 8",
+    "Goddess of Victory NIKKE", "Goddess of Victory", "NIKKE", "Arknights", "Tekken 7", "Tales of Arise",
+    "SynDuality Noir", "SynDuality", "The Idolmaster Shiny Colors", "Idolmaster Shiny Colors",
+    "Shiny Colors", "Gakuen Idolmaster", "Idolmaster", "Rurouni Kenshin", "2.5 Dimensional Seduction",
+    "The 100 Girlfriends Who Really Really Really Really Really Love You", "The 100 Girlfriends",
+    "100 Girlfriends", "To Love-Ru Darkness", "To Love Ru Darkness", "To Love-Ru", "To Love Ru",
+    "Puella Magi Madoka Magica", "Madoka Magica", "Sakamoto Days", "Re:Zero", "Re Zero",
+    "Beyond Journey's End", "Mobile Suit Gundam", "Macross Frontier", "Trigun Stampede",
+], key=len, reverse=True)
+SERIES_PATTERN = re.compile(
+    "|".join(rf"(?<![\w'])" + re.escape(name).replace(r"\ ", r"[\s:-]+") + r"(?![\w'])" for name in SERIES),
+    re.IGNORECASE,
+)
+NOISE_PHRASES = re.compile(
+    r"\b(?:union\s*arena|trading\s+card\s+game|card\s+game|near\s+mint|pack\s+fresh|alt(?:ernate)?\s+art|"
+    r"full\s+art|super\s+rare|secret\s+rare|gem\s+(?:mint|mt)|free\s+shipping|fast\s+shipping|in\s+hand|"
+    r"ships?\s+(?:today|fast|now)|us(?:a)?\s+seller|box\s+fresh|pop\s*\d+|vol(?:ume)?\.?\s*\d+|"
+    r"booster\s+pack|starter\s+deck|extra\s+booster|new\s+card\s+selection|bandai\s+namco|"
+    r"nm\s*/\s*m|m\s*/\s*nm|nm-mt)\b",
+    re.IGNORECASE,
+)
+NOISE_WORDS = {
+    "ua", "bandai", "tcg", "ccg", "card", "cards", "japanese", "japan", "jp", "jpn", "english", "en", "eng",
+    "nm", "nm-m", "nm+", "mint", "lp", "mp", "holo", "foil", "parallel", "rare", "new", "hot", "fresh",
+    "graded", "slab", "pop", "sr", "r", "u", "c", "ur", "sp", "sec", "ap", "pr", "star", "stars",
+    "trigger", "vol", "volume", "official", "authentic", "aa", "cert", "pristine", "carddass", "namco",
+    "candidate", "contender", "potential", "ready", "worthy", "quality", "possible", "hopeful",
+}
+ACRONYMS = {"OBC", "SAO", "MHA", "JJK", "AOT", "HXH", "TYBW", "II", "III", "IV", "DX", "EX", "GT"}
+SMALL_WORDS = {"of", "the", "no", "x", "and", "de", "von", "van", "to", "a", "an", "in", "on", "from", "with", "for"}
+
+
+def stars(title):
+    """How many stars the card's rarity has (1 to 3), or None if the title doesn't say."""
+    text = re.sub("[\u2606\u2B50\u2730\u272A\u2605\U0001F31F]\uFE0F?", "\u2605", title)
+    found = re.search(r"\b(one|two|three|single|double|triple|[123])[\s-]*stars?\b", text, re.IGNORECASE)
+    if found:
+        return STAR_WORDS[found.group(1).lower()]
+    found = re.search(r"(?<![\d.])([123])\s?[\u2605*](?![\u2605*\w])", text)
+    if found:
+        return int(found.group(1))
+    groups = re.findall("\u2605+", text)
+    if groups:
+        return min(max(len(group) for group in groups), 3)
+    found = re.search(rf"\b(?:{RARITY_CODES})\s?(\*{{1,3}})(?![*\w])", text)
+    return len(found.group(1)) if found else None
+
+
+def grade(item):
+    """'PSA 10', 'Graded' or 'Raw'. eBay's own graded/ungraded flag wins over the title."""
+    condition = str(item.get("condition") or "").lower()
+    found = GRADE.search(str(item.get("title") or ""))
+    slab = f"{found.group(1).upper()} {found.group(2)}" if found else None
+    if condition == "graded" or str(item.get("conditionId")) == "2750":
+        return slab or "Graded"
+    if condition == "ungraded" or str(item.get("conditionId")) == "4000":
+        return "Raw"
+    return slab or "Raw"
+
+
+def price(item):
+    amount = item.get("price") or {}
+    if item.get("currentBidPrice") and "FIXED_PRICE" not in (item.get("buyingOptions") or []):
+        amount = item["currentBidPrice"]
+    try:
+        value = float(amount.get("value"))
+    except (TypeError, ValueError):
+        return "price not shown"
+    text = f"{value:,.0f}" if value == int(value) else f"{value:,.2f}"
+    text = f"${text}" if amount.get("currency") in ("USD", None) else f"{text} {amount['currency']}"
+    return f"{text} bid" if amount is item.get("currentBidPrice") else text
+
+
+def card_name(title):
+    """The seller's title with everything that isn't the card's name taken out."""
+    title = str(title or "")
+    letters = [c for c in title if c.isalpha()]
+    shouting = bool(letters) and sum(c.isupper() for c in letters) > 0.7 * len(letters)
+    text = re.sub("[\u2606\u2B50\u2730\u272A\u2605\U0001F31F]\uFE0F?", "\u2605", title)
+    # Grades, including hopeful ones like "PSA 10?", then rarity and card numbers.
+    text = re.sub(
+        rf"\b(?:{GRADERS})\b[\s:#-]*(?:(?:GEM|MINT|MT|PRISTINE|GRADED)[\s-]*)*(?:\d{{1,2}}(?:\.5)?\+?)?\s*\??",
+        " ", text, flags=re.IGNORECASE,
+    )
+    text = CARD_NUMBER.sub(" ", text)
+    text = re.sub(r"\b(?:one|two|three|single|double|triple|[123])[\s-]*stars?\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<![\d.])[123]\s?[\u2605*]+", " ", text)
+    text = re.sub(rf"\b(?:{RARITY_CODES})\s?[\u2605*]+", " ", text)
+    text = re.sub("[\u2605*]+", " ", text)
+    text = re.sub("[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]", " ", text)      # emoji
+    text = NOISE_PHRASES.sub(" ", text)
+    with_series = text
+    text = SERIES_PATTERN.sub(" ", text)
+
+    def tidy(value):
+        value = re.sub(
+            r"(?<!\d)/(?!\d)|[|\\,;:()\[\]{}~\u2022\u00B7!?#\u3010\u3011\u300C\u300D\u300E\u300F]+|\s-+\s|\s-+$|^-+\s",
+            " ", value,
+        )
+        words = []
+        for word in value.split():
+            bare = word.strip("-.").lower()
+            if word.lower() in NOISE_WORDS or bare in NOISE_WORDS or re.fullmatch(r"\d{3,}|-*", bare):
+                continue
+            if word.upper() in ACRONYMS:
+                word = word.upper()
+            elif re.fullmatch(r"[A-Z][A-Z'.-]+", word) and (shouting or len(word) > 3) and "." not in word:
+                word = word.title()                      # ICHIGO -> Ichigo, HAE-IN -> Hae-In
+            elif word.islower() and word not in SMALL_WORDS:
+                word = word.capitalize()
+            words.append(word)
+        return " ".join(words)[:60].strip(" -.") if len(" ".join(words)) > 60 else " ".join(words).strip(" -")
+
+    return tidy(text) or tidy(with_series) or title[:60] or "Untitled"
+
+
+def describe(item):
+    """The four things an alert shows: name, rarity, grade and price."""
+    title = str(item.get("title") or "")
+    count = stars(title)
+    return {
+        "name": card_name(title),
+        "detail": "  \u00B7  ".join(part for part in ("\u2605" * count if count else "", grade(item)) if part),
+        "price": price(item),
+    }
+
+
+def item_url(item):
+    return item.get("itemWebUrl") or f'https://www.ebay.com/itm/{item.get("legacyItemId", "")}'
+
+
+def photo_urls(item):
+    """The listing photo, large first, then exactly as eBay gave it."""
+    original = (item.get("image") or {}).get("imageUrl")
+    if not original:
+        return []
+    large = re.sub(r"/s-l\d+\.", "/s-l800.", original.replace("/thumbs/images/", "/images/"))
+    return [large, original] if large != original else [original]
+
+
+def format_item(item):
+    card = describe(item)
+    return f"<b>{esc(card['name'])}</b>\n{esc(card['detail'])}\n<b>{esc(card['price'])}</b>"
+
+
+def format_summary(entries, remaining_after):
+    lines = [f"<b>+{len(entries)} more</b>"]
+    for item, _ in entries:
+        card = describe(item)
+        legacy = item.get("legacyItemId")
+        url = f"https://www.ebay.com/itm/{legacy}" if legacy else item_url(item)
+        lines.append(
+            f'\u2022 <a href="{html.escape(url, quote=True)}">{esc(card["name"])}</a>'
+            f"  \u00B7  {esc(card['detail'])}  \u00B7  <b>{esc(card['price'])}</b>"
+        )
+    if remaining_after:
+        lines.append(f"({remaining_after} more to follow)")
+    return "\n".join(lines)
+
+
 # ----------------------------------------------------------------- Telegram
 
 class Telegram:
@@ -248,26 +441,39 @@ class Telegram:
         self.wait_left = TELEGRAM_WAIT_BUDGET
         self.moved_to = None      # new chat ID if Telegram upgraded the group
 
-    def send(self, text, chat_id=None, preview=True):
+    def send(self, text, chat_id=None, preview=True, photos=(), link=None):
+        """Send one message. With photos and a link it is a photo card with a button.
+
+        If Telegram refuses a version of the message (it can't fetch the photo,
+        or dislikes the formatting) the next simpler version is tried, ending
+        with plain text, so an alert is not lost over presentation.
+        """
         chat = chat_id or TELEGRAM_CHAT_ID
         if self.moved_to and str(chat) == str(TELEGRAM_CHAT_ID):
             chat = self.moved_to
-        payload = {
-            "chat_id": chat,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": not preview,
-        }
+        button = {"inline_keyboard": [[{"text": "View on eBay", "url": link}]]} if link else None
+        with_link = f"{text}\n{esc(link)}" if link else text
+        versions = [
+            ("sendPhoto", {"photo": url, "caption": text, "parse_mode": "HTML", "reply_markup": button})
+            for url in (photos if link else ())
+        ]
+        versions.append(("sendMessage", {
+            "text": with_link, "parse_mode": "HTML", "disable_web_page_preview": not preview,
+        }))
+        versions.append(("sendMessage", {
+            "text": html.unescape(re.sub(r"<[^>]+>", "", with_link)), "disable_web_page_preview": not preview,
+        }))
         network_failures = 0
         while True:
+            method, payload = versions[0]
+            payload = dict(payload, chat_id=chat)
             if self.last_sent is not None:
                 gap = TELEGRAM_GAP - (time.monotonic() - self.last_sent)
                 if gap > 0:
                     time.sleep(gap)
             try:
                 response = requests.post(
-                    f"{TELEGRAM_API}/bot{TELEGRAM_TOKEN}/sendMessage",
-                    json=payload, timeout=TIMEOUT,
+                    f"{TELEGRAM_API}/bot{TELEGRAM_TOKEN}/{method}", json=payload, timeout=TIMEOUT,
                 )
             except requests.RequestException as error:
                 self.last_sent = time.monotonic()
@@ -285,6 +491,7 @@ class Telegram:
             except ValueError:
                 body = {}
             reason = scrub(body.get("description") or f"HTTP {status}")
+            moved = (body.get("parameters") or {}).get("migrate_to_chat_id")
             if status == 429:
                 wait = int((body.get("parameters") or {}).get("retry_after") or 5) + 1
                 if wait > self.wait_left:
@@ -296,63 +503,16 @@ class Telegram:
                 if network_failures >= 3:
                     raise TelegramDown(reason)
                 time.sleep(2 * network_failures)
-            elif (status == 400 and (body.get("parameters") or {}).get("migrate_to_chat_id")
-                    and body["parameters"]["migrate_to_chat_id"] != payload["chat_id"]):
+            elif status == 400 and moved and moved != chat:
                 # Telegram upgraded the group, which changes its ID. Follow it.
-                self.moved_to = body["parameters"]["migrate_to_chat_id"]
-                payload["chat_id"] = self.moved_to
-            elif status == 400 and "parse_mode" in payload and "chat" not in reason.lower():
-                # Formatting was refused: send it plain rather than lose it.
-                payload = dict(payload, text=html.unescape(re.sub(r"<[^>]+>", "", text)))
-                del payload["parse_mode"]
+                self.moved_to = chat = moved
             elif status == 400 and "chat" not in reason.lower():
-                raise MessageRejected(reason)
+                versions.pop(0)
+                if not versions:
+                    raise MessageRejected(reason)
+                print(f"  Telegram refused the {method} version ({reason}); trying a simpler one.")
             else:
                 raise TelegramDown(reason)
-
-
-def money(item):
-    bid = item.get("currentBidPrice")
-    price = item.get("price") or {}
-    if bid and "FIXED_PRICE" not in (item.get("buyingOptions") or []):
-        return f'{bid.get("value", "?")} {bid.get("currency", "")}'.strip() + " (current bid)"
-    return f'{price.get("value", "?")} {price.get("currency", "")}'.strip()
-
-
-def item_url(item):
-    return item.get("itemWebUrl") or f'https://www.ebay.com/itm/{item.get("legacyItemId", "")}'
-
-
-def format_item(item, label):
-    options = item.get("buyingOptions") or []
-    lines = [
-        f"\U0001F0CF <b>New listing</b> \u2014 {esc(label)}",
-        f"<b>{esc(item.get('title', 'Untitled'))}</b>",
-        f"\U0001F4B5 {esc(money(item))}",
-    ]
-    if item.get("condition"):
-        lines.append(f"\U0001F4E6 {esc(item['condition'])}")
-    if "AUCTION" in options:
-        lines.append("\U0001F528 Auction" + (" with Buy It Now" if "FIXED_PRICE" in options else ""))
-    elif "BEST_OFFER" in options:
-        lines.append("\U0001F91D Accepts offers")
-    lines.append(esc(item_url(item)))
-    return "\n".join(lines)
-
-
-def format_summary(entries, remaining_after):
-    noun = "listing" if len(entries) == 1 else "listings"
-    lines = [f"\U0001F0CF <b>{len(entries)} more new {noun}</b>"]
-    for item, label in entries:
-        legacy = item.get("legacyItemId")
-        url = f"https://www.ebay.com/itm/{legacy}" if legacy else item_url(item)
-        lines.append(
-            f'\u2022 <a href="{html.escape(url, quote=True)}">{esc(item.get("title", "Untitled"))}</a>'
-            f" \u2014 {esc(money(item))} \u00B7 {esc(label)}"
-        )
-    if remaining_after:
-        lines.append(f"({remaining_after} more to follow)")
-    return "\n".join(lines)
 
 
 def deliver(telegram, fresh, seen):
@@ -372,7 +532,8 @@ def deliver(telegram, fresh, seen):
             remaining = len(fresh) - delivered - len(batch)
             try:
                 if is_full:
-                    telegram.send(format_item(*batch[0]))
+                    item = batch[0][0]
+                    telegram.send(format_item(item), photos=photo_urls(item), link=item_url(item))
                 else:
                     telegram.send(format_summary(batch, remaining), preview=False)
             except MessageRejected as error:
@@ -636,7 +797,11 @@ def run(state, seen, first_run, now):
             queued.update(item["itemId"] for item in new_items)
             fresh += [(item, label) for item in new_items]
             for item in new_items:
-                print(f"  new: {label} | {category(item)} | {str(item.get('title'))[:70]}")
+                card = describe(item)
+                print(
+                    f"  new: {card['name']} | {card['detail']} | {card['price']}"
+                    f"  <-  {item.get('title')}  [{label}; {category(item)}]"
+                )
 
     if checked:
         if state.pop("auth_failures", 0) >= AUTH_FAILURES_BEFORE_WARNING:

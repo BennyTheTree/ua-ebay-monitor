@@ -56,10 +56,14 @@ Fewer searches does.
 
 ## Messages you may see
 
-- **New listing**: one message per listing, with a link preview.
-- **N more new listings**: when a run finds more than 12, the first 10 get
-  their own message and the rest are grouped, ten per message. Telegram only
-  accepts about 20 messages a minute, so this keeps anything from being lost.
+- **A photo card per listing**: the card's photo, then its name, star rarity,
+  grade (Raw, or the grader and grade) and price, with a **View on eBay**
+  button. These are read from the seller's title, so an odd title can give an
+  odd name. Rarity is left off when the title doesn't state it.
+- **+N more**: when a run finds more than 12, the first 10 get their own card
+  and the rest are listed ten per message, each line linking to its listing.
+  Telegram only accepts about 20 messages a minute, so this keeps anything
+  from being lost.
 - **Now watching ...**: a search was added or changed.
 - **Warnings (⚠️)**: something needs attention, such as a typo in
   `searches.json`, eBay refusing the login, or the cron-job.org trigger going
